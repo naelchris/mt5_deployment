@@ -169,17 +169,30 @@ jobs:
 
           pkill ngrok 2>/dev/null || true
           nohup ngrok tcp "$VNC_PORT" > /tmp/ngrok.log 2>&1 &
-          sleep 5
 
-          VNC_ADDR=$(curl -s localhost:4040/api/tunnels \
-            | python3 -c "
+          # Poll until the tunnel is established (up to ~40 s)
+          VNC_ADDR=""
+          for _i in $(seq 1 13); do
+            sleep 3
+            VNC_ADDR=$(curl -s localhost:4040/api/tunnels \
+              | python3 -c "
           import sys, json
-          tunnels = json.load(sys.stdin).get('tunnels', [])
-          if tunnels:
-              print(tunnels[0]['public_url'].replace('tcp://', ''))
-          else:
-              print('unavailable — check /tmp/ngrok.log')
-          " 2>/dev/null || echo "unavailable")
+          try:
+              tunnels = json.load(sys.stdin).get('tunnels', [])
+              if tunnels:
+                  print(tunnels[0]['public_url'].replace('tcp://', ''))
+          except Exception:
+              pass
+          " 2>/dev/null)
+            [ -n "$VNC_ADDR" ] && break
+          done
+
+          # If still empty, dump the ngrok log so the cause is visible in the run
+          if [ -z "$VNC_ADDR" ]; then
+            echo "::error::ngrok tunnel failed to start. Log output:"
+            cat /tmp/ngrok.log || true
+            VNC_ADDR="FAILED — see log above"
+          fi
 
           # Surface the address prominently in the workflow run UI
           echo "::notice title=VNC Connection Ready::Address: $VNC_ADDR  |  Password: $VNC_PASS"
