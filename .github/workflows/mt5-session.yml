@@ -24,8 +24,7 @@ jobs:
 
     permissions:
       contents: write
-      workflows: write   # needed to push branches that contain .github/workflows/
-      pull-requests: write  # needed to open PRs via gh pr create
+      pull-requests: write
 
     env:
       MT5_USER: ${{ secrets.MT5_USER || 'user' }}
@@ -216,7 +215,14 @@ jobs:
           else
             TIMESTAMP=$(date -u '+%Y-%m-%dT%H%M')
             BRANCH="mt5-state/${TIMESTAMP}"
-            git checkout -b "$BRANCH"
+
+            # Create an orphan branch so it carries ONLY the MT5 state files —
+            # no .github/workflows/ — which avoids the token workflow-scope error.
+            git checkout --orphan "$BRANCH"
+            git reset HEAD -- .github 2>/dev/null || true
+            git restore --staged .github 2>/dev/null || true
+            git clean -fd .github 2>/dev/null || true
+
             git commit -m "chore: export MT5 state — ${TIMESTAMP}"
             git push origin "$BRANCH"
             gh pr create \
