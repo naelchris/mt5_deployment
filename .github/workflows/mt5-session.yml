@@ -226,20 +226,14 @@ jobs:
         run: |
           MT5="${{ env.MT5_ROOT }}"
 
-          # Debug: show what actually exists in the volume so we can verify paths
-          echo "=== MT5 root contents ==="
-          ls -la "$MT5/" 2>/dev/null || echo "MT5 root not found: $MT5"
-          echo "=== MQL5 contents ==="
-          ls -la "$MT5/MQL5/" 2>/dev/null || echo "MQL5 dir not found"
-          echo "=== config contents ==="
-          ls -la "$MT5/config/" 2>/dev/null || echo "config dir not found"
-
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Get back onto main and pull any changes made while session was running
+          # Get back onto main and pull latest before we write anything
           git checkout main
           git pull origin main --ff-only
+
+          cd "${GITHUB_WORKSPACE}"
 
           # ── MQL5 source files ───────────────────────────────────────────────
           for dir in Experts Indicators Scripts Libraries; do
@@ -247,7 +241,11 @@ jobs:
             dst="${GITHUB_WORKSPACE}/MQL5/$dir"
             if [ -d "$src" ]; then
               mkdir -p "$dst"
-              rsync -a --delete --itemize-changes "$src/" "$dst/" | head -20
+              # No pipe — piping to head sends SIGPIPE which kills rsync early
+              rsync -a --delete "$src/" "$dst/"
+              echo "Synced MQL5/$dir ($(find "$dst" -type f | wc -l) files)"
+            else
+              echo "Skipped MQL5/$dir — not found in container"
             fi
           done
 
@@ -255,25 +253,32 @@ jobs:
           if [ -d "$MT5/MQL5/Files" ]; then
             mkdir -p "${GITHUB_WORKSPACE}/MQL5/Files"
             rsync -a --delete "$MT5/MQL5/Files/" "${GITHUB_WORKSPACE}/MQL5/Files/"
+            echo "Synced MQL5/Files"
           fi
 
           # Chart profiles / layouts
           if [ -d "$MT5/Profiles" ]; then
             mkdir -p "${GITHUB_WORKSPACE}/Profiles"
             rsync -a --delete "$MT5/Profiles/" "${GITHUB_WORKSPACE}/Profiles/"
+            echo "Synced Profiles"
           fi
 
-          # Terminal config: broker servers, chart templates, terminal.ini, accounts
-          # MT5 encrypts .dat files (account credentials) — safe to commit
+          # Terminal config: broker servers, templates, terminal.ini
+          # .dat files hold encrypted account credentials — safe to commit
           if [ -d "$MT5/config" ]; then
             mkdir -p "${GITHUB_WORKSPACE}/MT5Config"
             rsync -a --delete \
               --exclude='*.log' \
-              --itemize-changes \
-              "$MT5/config/" "${GITHUB_WORKSPACE}/MT5Config/" | head -30
+              "$MT5/config/" "${GITHUB_WORKSPACE}/MT5Config/"
+            echo "Synced MT5Config ($(ls "${GITHUB_WORKSPACE}/MT5Config/" | wc -l) files)"
+          else
+            echo "No MT5 config dir found at: $MT5/config"
           fi
 
-          git add MQL5/ Profiles/ MT5Config/ 2>/dev/null || true
+          # Stage everything and show what changed
+          git add MQL5/ Profiles/ MT5Config/
+          echo "=== git status ==="
+          git status --short
 
           if git diff --staged --quiet; then
             echo "No changes — nothing to export"
