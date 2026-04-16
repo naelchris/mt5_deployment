@@ -34,14 +34,12 @@ jobs:
 
     permissions:
       contents: write
-      pull-requests: write
 
     env:
       MT5_USER: ${{ secrets.MT5_USER || 'user' }}
       MT5_PASS: ${{ secrets.MT5_PASS || 'mt5pass' }}
-      # Paths inside the cached config volume
-      MT5_MQL5:     './config/.wine/drive_c/Program Files/MetaTrader 5/MQL5'
-      MT5_PROFILES: './config/.wine/drive_c/Program Files/MetaTrader 5/Profiles'
+      # Root of the MT5 install inside the cached Wine volume
+      MT5_ROOT: './config/.wine/drive_c/Program Files/MetaTrader 5'
 
     steps:
       # ── 0. Checkout ──────────────────────────────────────────────────────────
@@ -84,21 +82,41 @@ jobs:
           key: mt5-docker-config-${{ runner.os }}-v1
 
       # ── 2. Inject saved MT5 state from repo into the config volume ───────────
+      # Restores MQL5 source files, EA data files, profiles AND terminal config.
       - name: Restore MT5 state from repo
         run: |
-          for dir in Experts Indicators Scripts; do
-            src="${GITHUB_WORKSPACE}/$dir"
-            dst="${{ env.MT5_MQL5 }}/$dir"
+          MT5="${{ env.MT5_ROOT }}"
+
+          # MQL5 source directories
+          for dir in Experts Indicators Scripts Libraries; do
+            src="${GITHUB_WORKSPACE}/MQL5/$dir"
+            dst="$MT5/MQL5/$dir"
             if [ -d "$src" ]; then
               mkdir -p "$dst"
               rsync -a --delete "$src/" "$dst/"
-              echo "Restored $dir"
+              echo "Restored MQL5/$dir"
             fi
           done
+
+          # EA runtime data files
+          if [ -d "${GITHUB_WORKSPACE}/MQL5/Files" ]; then
+            mkdir -p "$MT5/MQL5/Files"
+            rsync -a --delete "${GITHUB_WORKSPACE}/MQL5/Files/" "$MT5/MQL5/Files/"
+            echo "Restored MQL5/Files"
+          fi
+
+          # Chart profiles / layouts
           if [ -d "${GITHUB_WORKSPACE}/Profiles" ]; then
-            mkdir -p "${{ env.MT5_PROFILES }}"
-            rsync -a --delete "${GITHUB_WORKSPACE}/Profiles/" "${{ env.MT5_PROFILES }}/"
+            mkdir -p "$MT5/Profiles"
+            rsync -a --delete "${GITHUB_WORKSPACE}/Profiles/" "$MT5/Profiles/"
             echo "Restored Profiles"
+          fi
+
+          # Terminal config (broker servers, templates, terminal.ini)
+          if [ -d "${GITHUB_WORKSPACE}/MT5Config" ]; then
+            mkdir -p "$MT5/config"
+            rsync -a --delete "${GITHUB_WORKSPACE}/MT5Config/" "$MT5/config/"
+            echo "Restored MT5Config"
           fi
 
       # ── 3. Start MT5 Docker container ────────────────────────────────────────
@@ -201,53 +219,61 @@ jobs:
           sleep $(( MINS * 60 ))
 
       # ── 7. Export MT5 state back to GitHub ───────────────────────────────────
-      # Runs even on cancellation. Pushes a new branch and opens a PR —
-      # never force-pushes to main so there are no conflicts.
+      # Runs even on cancellation (if: always()).
+      # Pulls latest main first to avoid conflicts, then pushes directly.
       - name: Export MT5 state to GitHub
         if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for dir in Experts Indicators Scripts; do
-            src="${{ env.MT5_MQL5 }}/$dir"
-            dst="${GITHUB_WORKSPACE}/$dir"
+          MT5="${{ env.MT5_ROOT }}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Get back onto main and pull any changes made while session was running
+          git checkout main
+          git pull origin main --ff-only
+
+          # ── MQL5 source files ───────────────────────────────────────────────
+          for dir in Experts Indicators Scripts Libraries; do
+            src="$MT5/MQL5/$dir"
+            dst="${GITHUB_WORKSPACE}/MQL5/$dir"
             if [ -d "$src" ]; then
               mkdir -p "$dst"
               rsync -a --delete "$src/" "$dst/"
             fi
           done
 
-          if [ -d "${{ env.MT5_PROFILES }}" ]; then
-            mkdir -p "${GITHUB_WORKSPACE}/Profiles"
-            rsync -a --delete "${{ env.MT5_PROFILES }}/" "${GITHUB_WORKSPACE}/Profiles/"
+          # EA runtime data files
+          if [ -d "$MT5/MQL5/Files" ]; then
+            mkdir -p "${GITHUB_WORKSPACE}/MQL5/Files"
+            rsync -a --delete "$MT5/MQL5/Files/" "${GITHUB_WORKSPACE}/MQL5/Files/"
           fi
 
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Chart profiles / layouts
+          if [ -d "$MT5/Profiles" ]; then
+            mkdir -p "${GITHUB_WORKSPACE}/Profiles"
+            rsync -a --delete "$MT5/Profiles/" "${GITHUB_WORKSPACE}/Profiles/"
+          fi
 
-          git add Experts Indicators Scripts Profiles 2>/dev/null || true
+          # Terminal config: broker servers, chart templates, terminal.ini
+          # Skips .dat / .log files that may contain raw account credentials
+          if [ -d "$MT5/config" ]; then
+            mkdir -p "${GITHUB_WORKSPACE}/MT5Config"
+            rsync -a --delete \
+              --exclude='*.dat' \
+              --exclude='*.log' \
+              "$MT5/config/" "${GITHUB_WORKSPACE}/MT5Config/"
+          fi
+
+          git add MQL5/ Profiles/ MT5Config/ 2>/dev/null || true
 
           if git diff --staged --quiet; then
             echo "No changes — nothing to export"
           else
-            TIMESTAMP=$(date -u '+%Y-%m-%dT%H%M')
-            BRANCH="mt5-state/${TIMESTAMP}"
-
-            # Create an orphan branch so it carries ONLY the MT5 state files —
-            # no .github/workflows/ — which avoids the token workflow-scope error.
-            git checkout --orphan "$BRANCH"
-            git reset HEAD -- .github 2>/dev/null || true
-            git restore --staged .github 2>/dev/null || true
-            git clean -fd .github 2>/dev/null || true
-
+            TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
             git commit -m "chore: export MT5 state — ${TIMESTAMP}"
-            git push origin "$BRANCH"
-            gh pr create \
-              --title "MT5 state export — ${TIMESTAMP}" \
-              --body "Automated export from Actions run [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})." \
-              --base main \
-              --head "$BRANCH"
-            echo "PR opened for branch $BRANCH"
+            git push origin main
+            echo "State exported to main"
           fi
 
       # ── 8. Stop container ────────────────────────────────────────────────────
