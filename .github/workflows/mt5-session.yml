@@ -1,9 +1,11 @@
 name: MT5 Trading Session
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Trigger manually from GitHub → Actions → "MT5 Trading Session" → Run workflow
+# Trigger manually: GitHub → Actions → "MT5 Trading Session" → Run workflow
+#
 # Required secrets:  NGROK_TOKEN
-# Optional secrets:  VNC_PASS  (defaults to "mt5vnc")
+# Optional secrets:  MT5_USER   (default: "user")
+#                    MT5_PASS   (default: "mt5pass")
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -18,15 +20,17 @@ on:
 jobs:
   mt5-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 120   # hard safety net — keeps a forgotten session from billing forever
+    timeout-minutes: 120
 
     permissions:
-      contents: write       # needed to push the state-export commit
+      contents: write
 
     env:
-      DISPLAY: ':99'
-      VNC_PORT: '5900'
-      VNC_PASS: ${{ secrets.VNC_PASS || 'mt5vnc' }}
+      MT5_USER: ${{ secrets.MT5_USER || 'user' }}
+      MT5_PASS: ${{ secrets.MT5_PASS || 'mt5pass' }}
+      # Paths inside the cached config volume
+      MT5_MQL5:     './config/.wine/drive_c/Program Files/MetaTrader 5/MQL5'
+      MT5_PROFILES: './config/.wine/drive_c/Program Files/MetaTrader 5/Profiles'
 
     steps:
       # ── 0. Checkout ──────────────────────────────────────────────────────────
@@ -35,92 +39,45 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 1. Cache Wine prefix + MT5 ──────────────────────────────────────────
-      # Caches the entire Wine prefix so subsequent runs skip the ~60 s install.
-      # Bump the key suffix (v1 → v2 …) to force a fresh install.
-      - name: Restore Wine + MT5 cache
-        id: cache-wine
+      # ── 1a. Cache the Docker image (~4 GB) ───────────────────────────────────
+      # Saves a docker save tarball so subsequent runs skip the Docker Hub pull.
+      # Bump the key suffix to force a fresh pull of a newer image version.
+      - name: Restore Docker image cache
+        id: cache-image
         uses: actions/cache@v4
         with:
-          path: ~/.wine
-          key: wine-mt5-${{ runner.os }}-v1
+          path: /tmp/mt5-image.tar
+          key: mt5-docker-image-v1
 
-      # ── 2. Cache MT5 installer binary ────────────────────────────────────────
-      - name: Restore MT5 installer cache
-        id: cache-installer
+      - name: Load or pull Docker image
+        run: |
+          if [ -f /tmp/mt5-image.tar ]; then
+            echo "Loading image from cache..."
+            docker load < /tmp/mt5-image.tar
+          else
+            echo "Pulling image from Docker Hub..."
+            docker pull gmag11/metatrader5_vnc:latest
+            echo "Saving image to cache..."
+            docker save gmag11/metatrader5_vnc:latest > /tmp/mt5-image.tar
+          fi
+
+      # ── 1b. Cache the Docker /config volume ──────────────────────────────────
+      # The /config volume holds the Wine prefix + MT5 installation (~1-2 GB).
+      # On warm runs the container skips the full install and starts in seconds.
+      # Bump the key suffix (v1 → v2 …) to force a clean install.
+      - name: Restore MT5 config cache
+        id: cache-config
         uses: actions/cache@v4
         with:
-          path: /tmp/mt5setup.exe
-          key: mt5-installer-v1
+          path: ./config
+          key: mt5-docker-config-${{ runner.os }}-v1
 
-      # ── 3. System dependencies ───────────────────────────────────────────────
-      - name: Install system dependencies
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            wine wine32 wine64 libwine \
-            xvfb x11vnc rsync wget curl
-
-      # ── 4. Virtual display ───────────────────────────────────────────────────
-      - name: Start virtual display
-        run: |
-          pkill Xvfb 2>/dev/null || true
-          Xvfb :99 -screen 0 1280x800x24 -ac &
-          sleep 2
-          echo "Virtual display :99 ready"
-
-      # ── 5. Wine prefix ───────────────────────────────────────────────────────
-      - name: Init Wine prefix (64-bit)
-        run: |
-          # Wipe any stale 32-bit prefix — MT5 requires 64-bit
-          if [ -f ~/.wine/system.reg ] && \
-             ! grep -q '#arch=win64' ~/.wine/system.reg 2>/dev/null; then
-            echo "32-bit prefix detected — recreating as 64-bit..."
-            rm -rf ~/.wine
-          fi
-          if [ ! -f ~/.wine/system.reg ]; then
-            echo "Initialising Wine prefix (64-bit)..."
-            WINEARCH=win64 WINEPREFIX=~/.wine WINEDEBUG=-all \
-              wineboot --init 2>/dev/null || true
-            echo "Wine prefix ready"
-          else
-            echo "Wine prefix already initialised (from cache)"
-          fi
-
-      # ── 6. Download MT5 installer ────────────────────────────────────────────
-      - name: Download MT5 installer
-        if: steps.cache-installer.outputs.cache-hit != 'true'
-        run: |
-          wget -q --show-progress -O /tmp/mt5setup.exe \
-            "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
-
-      # ── 7. Install MT5 ───────────────────────────────────────────────────────
-      - name: Install MetaTrader 5
-        if: steps.cache-wine.outputs.cache-hit != 'true'
-        run: |
-          MT5_EXE="$HOME/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
-          if [ ! -f "$MT5_EXE" ]; then
-            echo "Installing MT5 via Wine (silent, ~60 s)..."
-            WINEARCH=win64 WINEPREFIX=~/.wine WINEDEBUG=-all \
-              wine /tmp/mt5setup.exe /auto &
-            WINE_PID=$!
-            for _i in $(seq 1 18); do
-              sleep 5
-              [ -f "$MT5_EXE" ] && { echo "MT5 installed"; break; }
-              kill -0 $WINE_PID 2>/dev/null || { echo "Installer exited"; break; }
-            done
-          else
-            echo "MT5 already installed (from cache)"
-          fi
-
-      # ── 8. Restore MT5 state from repo ──────────────────────────────────────
+      # ── 2. Inject saved MT5 state from repo into the config volume ───────────
       - name: Restore MT5 state from repo
         run: |
-          MT5_DATA="$HOME/.wine/drive_c/Program Files/MetaTrader 5"
           for dir in Experts Indicators Scripts; do
             src="${GITHUB_WORKSPACE}/$dir"
-            dst="$MT5_DATA/MQL5/$dir"
+            dst="${{ env.MT5_MQL5 }}/$dir"
             if [ -d "$src" ]; then
               mkdir -p "$dst"
               rsync -a --delete "$src/" "$dst/"
@@ -128,37 +85,47 @@ jobs:
             fi
           done
           if [ -d "${GITHUB_WORKSPACE}/Profiles" ]; then
-            mkdir -p "$MT5_DATA/Profiles"
-            rsync -a --delete "${GITHUB_WORKSPACE}/Profiles/" "$MT5_DATA/Profiles/"
+            mkdir -p "${{ env.MT5_PROFILES }}"
+            rsync -a --delete "${GITHUB_WORKSPACE}/Profiles/" "${{ env.MT5_PROFILES }}/"
             echo "Restored Profiles"
           fi
 
-      # ── 9. Launch MT5 ────────────────────────────────────────────────────────
-      - name: Launch MetaTrader 5
+      # ── 3. Start MT5 Docker container ────────────────────────────────────────
+      # Port 3000 → KasmVNC web UI  (browser access, no VNC client needed)
+      # Port 8001 → mt5linux RPyC   (Python MetaTrader5 API)
+      - name: Start MT5 container
         run: |
-          MT5_EXE="$HOME/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
-          WINEARCH=win64 WINEPREFIX=~/.wine WINEDEBUG=-all wine "$MT5_EXE" &
-          sleep 5
-          echo "MetaTrader 5 launched"
+          docker run -d \
+            --name mt5 \
+            -p 3000:3000 \
+            -p 8001:8001 \
+            -v "$(pwd)/config:/config" \
+            -e CUSTOM_USER="${MT5_USER}" \
+            -e PASSWORD="${MT5_PASS}" \
+            gmag11/metatrader5_vnc:latest
+          echo "Container started"
 
-      # ── 10. VNC server ───────────────────────────────────────────────────────
-      - name: Start VNC server
+      # ── 4. Wait for KasmVNC web interface to become ready ────────────────────
+      - name: Wait for MT5 to be ready
         run: |
-          pkill x11vnc 2>/dev/null || true
-          x11vnc \
-            -display :99 \
-            -rfbport "$VNC_PORT" \
-            -passwd  "$VNC_PASS" \
-            -forever -shared -noxdamage \
-            -bg -o /tmp/x11vnc.log
-          echo "VNC server running on port $VNC_PORT"
+          echo "Waiting for MT5 web interface (port 3000)..."
+          for _i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 || true)
+            if echo "$STATUS" | grep -qE "^(200|301|302)$"; then
+              echo "MT5 web interface ready (HTTP $STATUS)"
+              break
+            fi
+            echo "  attempt $_i/30 — HTTP $STATUS, waiting 10 s..."
+            sleep 10
+          done
 
-      # ── 11. Ngrok tunnel + print address ─────────────────────────────────────
+      # ── 5. Ngrok HTTP tunnel ─────────────────────────────────────────────────
+      # HTTP tunnel on port 3000 — works on ngrok free plan.
+      # KasmVNC serves a full browser-based MT5 desktop at this URL.
       - name: Setup ngrok tunnel
         env:
           NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
         run: |
-          # Install ngrok via official APT source
           curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
             | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc > /dev/null
           echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
@@ -166,68 +133,65 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq ngrok
 
           ngrok config add-authtoken "$NGROK_TOKEN"
+          nohup ngrok http 3000 > /tmp/ngrok.log 2>&1 &
 
-          pkill ngrok 2>/dev/null || true
-          nohup ngrok tcp "$VNC_PORT" > /tmp/ngrok.log 2>&1 &
-
-          # Poll until the tunnel is established (up to ~40 s)
-          VNC_ADDR=""
+          # Poll until HTTPS URL is available (up to ~40 s)
+          MT5_URL=""
           for _i in $(seq 1 13); do
             sleep 3
-            VNC_ADDR=$(curl -s localhost:4040/api/tunnels \
+            MT5_URL=$(curl -s localhost:4040/api/tunnels \
               | python3 -c "
           import sys, json
           try:
               tunnels = json.load(sys.stdin).get('tunnels', [])
-              if tunnels:
-                  print(tunnels[0]['public_url'].replace('tcp://', ''))
+              for t in tunnels:
+                  if t.get('proto') == 'https':
+                      print(t['public_url'])
+                      break
           except Exception:
               pass
           " 2>/dev/null)
-            [ -n "$VNC_ADDR" ] && break
+            [ -n "$MT5_URL" ] && break
           done
 
-          # If still empty, dump the ngrok log so the cause is visible in the run
-          if [ -z "$VNC_ADDR" ]; then
-            echo "::error::ngrok tunnel failed to start. Log output:"
+          if [ -z "$MT5_URL" ]; then
+            echo "::error::ngrok failed to start. Log:"
             cat /tmp/ngrok.log || true
-            VNC_ADDR="FAILED — see log above"
+            MT5_URL="FAILED — see log above"
           fi
 
-          # Surface the address prominently in the workflow run UI
-          echo "::notice title=VNC Connection Ready::Address: $VNC_ADDR  |  Password: $VNC_PASS"
+          echo "::notice title=MT5 Ready — Open in browser::URL: $MT5_URL  |  User: $MT5_USER  |  Password: $MT5_PASS"
           echo ""
-          echo "  ┌──────────────────────────────────────────────┐"
-          echo "  │  VNC address : $VNC_ADDR"
-          echo "  │  VNC password: $VNC_PASS"
-          echo "  └──────────────────────────────────────────────┘"
+          echo "  ┌──────────────────────────────────────────────────────────┐"
+          echo "  │  Open MT5 in your browser:                               │"
+          echo "  │  URL:      $MT5_URL                                      │"
+          echo "  │  User:     $MT5_USER                                     │"
+          echo "  │  Password: $MT5_PASS                                     │"
+          echo "  └──────────────────────────────────────────────────────────┘"
           echo ""
-          echo "VNC_ADDR=$VNC_ADDR" >> "$GITHUB_ENV"
+          echo "MT5_URL=$MT5_URL" >> "$GITHUB_ENV"
 
-      # ── 12. Session window ───────────────────────────────────────────────────
-      # The runner stays alive for the configured duration.
-      # To end early: cancel this workflow run from the GitHub Actions UI.
-      # The export step runs regardless (if: always()), so state is always saved.
+      # ── 6. Session window ────────────────────────────────────────────────────
+      # Runner stays alive for the configured duration.
+      # Cancel this workflow run from the GitHub Actions UI to end early.
+      # The export step below runs regardless (if: always()).
       - name: Session active — ${{ github.event.inputs.session_minutes || '90' }} minutes
         run: |
           MINS="${{ github.event.inputs.session_minutes || '90' }}"
-          echo "Session open for ${MINS} min."
-          echo "Connect via VNC to: $VNC_ADDR"
+          echo "Session open for ${MINS} min. MT5 browser URL: $MT5_URL"
           echo "Cancel this workflow run to end early — state will still be exported."
           sleep $(( MINS * 60 ))
 
-      # ── 13. Export MT5 state back to GitHub ──────────────────────────────────
-      # Pushes to a fresh branch and opens a PR — never touches main directly,
-      # so it can't conflict even if main moved forward during the session.
+      # ── 7. Export MT5 state back to GitHub ───────────────────────────────────
+      # Runs even on cancellation. Pushes a new branch and opens a PR —
+      # never force-pushes to main so there are no conflicts.
       - name: Export MT5 state to GitHub
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          MT5_DATA="$HOME/.wine/drive_c/Program Files/MetaTrader 5"
-
           for dir in Experts Indicators Scripts; do
-            src="$MT5_DATA/MQL5/$dir"
+            src="${{ env.MT5_MQL5 }}/$dir"
             dst="${GITHUB_WORKSPACE}/$dir"
             if [ -d "$src" ]; then
               mkdir -p "$dst"
@@ -235,9 +199,9 @@ jobs:
             fi
           done
 
-          if [ -d "$MT5_DATA/Profiles" ]; then
+          if [ -d "${{ env.MT5_PROFILES }}" ]; then
             mkdir -p "${GITHUB_WORKSPACE}/Profiles"
-            rsync -a --delete "$MT5_DATA/Profiles/" "${GITHUB_WORKSPACE}/Profiles/"
+            rsync -a --delete "${{ env.MT5_PROFILES }}/" "${GITHUB_WORKSPACE}/Profiles/"
           fi
 
           git config user.name  "github-actions[bot]"
@@ -250,16 +214,18 @@ jobs:
           else
             TIMESTAMP=$(date -u '+%Y-%m-%dT%H%M')
             BRANCH="mt5-state/${TIMESTAMP}"
-
             git checkout -b "$BRANCH"
             git commit -m "chore: export MT5 state — ${TIMESTAMP}"
             git push origin "$BRANCH"
-
             gh pr create \
               --title "MT5 state export — ${TIMESTAMP}" \
-              --body "Automated export from GitHub Actions run [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})." \
+              --body "Automated export from Actions run [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})." \
               --base main \
               --head "$BRANCH"
-
             echo "PR opened for branch $BRANCH"
           fi
+
+      # ── 8. Stop container ────────────────────────────────────────────────────
+      - name: Stop MT5 container
+        if: always()
+        run: docker stop mt5 2>/dev/null || true
