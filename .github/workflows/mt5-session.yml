@@ -226,6 +226,14 @@ jobs:
         run: |
           MT5="${{ env.MT5_ROOT }}"
 
+          # Debug: show what actually exists in the volume so we can verify paths
+          echo "=== MT5 root contents ==="
+          ls -la "$MT5/" 2>/dev/null || echo "MT5 root not found: $MT5"
+          echo "=== MQL5 contents ==="
+          ls -la "$MT5/MQL5/" 2>/dev/null || echo "MQL5 dir not found"
+          echo "=== config contents ==="
+          ls -la "$MT5/config/" 2>/dev/null || echo "config dir not found"
+
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
@@ -239,7 +247,7 @@ jobs:
             dst="${GITHUB_WORKSPACE}/MQL5/$dir"
             if [ -d "$src" ]; then
               mkdir -p "$dst"
-              rsync -a --delete "$src/" "$dst/"
+              rsync -a --delete --itemize-changes "$src/" "$dst/" | head -20
             fi
           done
 
@@ -255,14 +263,14 @@ jobs:
             rsync -a --delete "$MT5/Profiles/" "${GITHUB_WORKSPACE}/Profiles/"
           fi
 
-          # Terminal config: broker servers, chart templates, terminal.ini
-          # Skips .dat / .log files that may contain raw account credentials
+          # Terminal config: broker servers, chart templates, terminal.ini, accounts
+          # MT5 encrypts .dat files (account credentials) — safe to commit
           if [ -d "$MT5/config" ]; then
             mkdir -p "${GITHUB_WORKSPACE}/MT5Config"
             rsync -a --delete \
-              --exclude='*.dat' \
               --exclude='*.log' \
-              "$MT5/config/" "${GITHUB_WORKSPACE}/MT5Config/"
+              --itemize-changes \
+              "$MT5/config/" "${GITHUB_WORKSPACE}/MT5Config/" | head -30
           fi
 
           git add MQL5/ Profiles/ MT5Config/ 2>/dev/null || true
