@@ -24,6 +24,8 @@ jobs:
 
     permissions:
       contents: write
+      workflows: write   # needed to push branches that contain .github/workflows/
+      pull-requests: write  # needed to open PRs via gh pr create
 
     env:
       MT5_USER: ${{ secrets.MT5_USER || 'user' }}
