@@ -16,7 +16,7 @@ DISP="${DISP:-:99}"
 NGROK_TOKEN="1eqDDFA2XmhchLGZovN83Z27YrD_4YyD4xK98Jec8uj6Ag5o8"
 MT5_URL="https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 MT5_SETUP="/tmp/mt5setup.exe"
-REPO_DIR="/tmp/algoTrading"
+REPO_DIR="/tmp/mt5_deployment"
 MT5_DATA="${HOME}/.wine/drive_c/Program Files/MetaTrader 5"
 
 # ── 1. System dependencies ────────────────────────────────────────────────────
@@ -125,7 +125,7 @@ log "Restoring MT5 state from GitHub..."
 if [ -d "$REPO_DIR/.git" ]; then
     git -C "$REPO_DIR" pull --ff-only
 else
-    git clone --depth 1 https://github.com/naelchris/algoTrading.git "$REPO_DIR"
+    git clone --depth 1 https://github.com/naelchris/mt5_deployment.git "$REPO_DIR"
 fi
 
 # Sync data directories into MT5 install dir

@@ -10,7 +10,7 @@ ok()  { echo -e "${GREEN}✓ $*${RESET}"; }
 err() { echo -e "${RED}✗ $*${RESET}"; exit 1; }
 log() { echo "▶ $*"; }
 
-REPO_DIR="/tmp/algoTrading"
+REPO_DIR="/tmp/mt5_deployment"
 MT5_DATA="${HOME}/.wine/drive_c/Program Files/MetaTrader 5"
 
 # ── 1. Verify repo is present ─────────────────────────────────────────────────
