@@ -16,10 +16,20 @@ on:
         required: false
         default: '90'
         type: string
+      runner_size:
+        description: 'Runner size (larger = more CPU/RAM, costs more minutes)'
+        required: false
+        default: 'ubuntu-latest'
+        type: choice
+        options:
+          - ubuntu-latest          #  2 vCPU  7 GB  — free tier
+          - ubuntu-latest-4-cores  #  4 vCPU 16 GB  — needs GitHub Team plan
+          - ubuntu-latest-8-cores  #  8 vCPU 32 GB  — needs GitHub Team plan
+          - ubuntu-latest-16-cores # 16 vCPU 64 GB  — needs GitHub Team plan
 
 jobs:
   mt5-session:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner_size || 'ubuntu-latest' }}
     timeout-minutes: 120
 
     permissions:
@@ -96,8 +106,15 @@ jobs:
       # Port 8001 → mt5linux RPyC   (Python MetaTrader5 API)
       - name: Start MT5 container
         run: |
+          # Give the container all CPUs and leave ~1 GB for the runner OS
+          TOTAL_MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+          CONTAINER_MEM_MB=$(( TOTAL_MEM_MB - 1024 ))
+          echo "Runner: $(nproc) vCPU, ${TOTAL_MEM_MB} MB RAM → giving container $(nproc) vCPU, ${CONTAINER_MEM_MB} MB"
+
           docker run -d \
             --name mt5 \
+            --cpus="$(nproc)" \
+            --memory="${CONTAINER_MEM_MB}m" \
             -p 3000:3000 \
             -p 8001:8001 \
             -v "$(pwd)/config:/config" \
