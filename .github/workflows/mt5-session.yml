@@ -1,0 +1,239 @@
+name: MT5 Trading Session
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trigger manually from GitHub → Actions → "MT5 Trading Session" → Run workflow
+# Required secrets:  NGROK_TOKEN
+# Optional secrets:  VNC_PASS  (defaults to "mt5vnc")
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_minutes:
+        description: 'Session duration in minutes (max 110)'
+        required: false
+        default: '90'
+        type: string
+
+jobs:
+  mt5-session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120   # hard safety net — keeps a forgotten session from billing forever
+
+    permissions:
+      contents: write       # needed to push the state-export commit
+
+    env:
+      DISPLAY: ':99'
+      VNC_PORT: '5900'
+      VNC_PASS: ${{ secrets.VNC_PASS || 'mt5vnc' }}
+
+    steps:
+      # ── 0. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 1. Cache Wine prefix + MT5 ──────────────────────────────────────────
+      # Caches the entire Wine prefix so subsequent runs skip the ~60 s install.
+      # Bump the key suffix (v1 → v2 …) to force a fresh install.
+      - name: Restore Wine + MT5 cache
+        id: cache-wine
+        uses: actions/cache@v4
+        with:
+          path: ~/.wine
+          key: wine-mt5-${{ runner.os }}-v1
+
+      # ── 2. Cache MT5 installer binary ────────────────────────────────────────
+      - name: Restore MT5 installer cache
+        id: cache-installer
+        uses: actions/cache@v4
+        with:
+          path: /tmp/mt5setup.exe
+          key: mt5-installer-v1
+
+      # ── 3. System dependencies ───────────────────────────────────────────────
+      - name: Install system dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            wine wine32 wine64 libwine \
+            xvfb x11vnc rsync wget curl
+
+      # ── 4. Virtual display ───────────────────────────────────────────────────
+      - name: Start virtual display
+        run: |
+          pkill Xvfb 2>/dev/null || true
+          Xvfb :99 -screen 0 1280x800x24 -ac &
+          sleep 2
+          echo "Virtual display :99 ready"
+
+      # ── 5. Wine prefix ───────────────────────────────────────────────────────
+      - name: Init Wine prefix (64-bit)
+        run: |
+          # Wipe any stale 32-bit prefix — MT5 requires 64-bit
+          if [ -f ~/.wine/system.reg ] && \
+             ! grep -q '#arch=win64' ~/.wine/system.reg 2>/dev/null; then
+            echo "32-bit prefix detected — recreating as 64-bit..."
+            rm -rf ~/.wine
+          fi
+          if [ ! -f ~/.wine/system.reg ]; then
+            echo "Initialising Wine prefix (64-bit)..."
+            WINEARCH=win64 WINEPREFIX=~/.wine WINEDEBUG=-all \
+              wineboot --init 2>/dev/null || true
+            echo "Wine prefix ready"
+          else
+            echo "Wine prefix already initialised (from cache)"
+          fi
+
+      # ── 6. Download MT5 installer ────────────────────────────────────────────
+      - name: Download MT5 installer
+        if: steps.cache-installer.outputs.cache-hit != 'true'
+        run: |
+          wget -q --show-progress -O /tmp/mt5setup.exe \
+            "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
+
+      # ── 7. Install MT5 ───────────────────────────────────────────────────────
+      - name: Install MetaTrader 5
+        if: steps.cache-wine.outputs.cache-hit != 'true'
+        run: |
+          MT5_EXE="$HOME/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+          if [ ! -f "$MT5_EXE" ]; then
+            echo "Installing MT5 via Wine (silent, ~60 s)..."
+            WINEARCH=win64 WINEPREFIX=~/.wine WINEDEBUG=-all \
+              wine /tmp/mt5setup.exe /auto &
+            WINE_PID=$!
+            for _i in $(seq 1 18); do
+              sleep 5
+              [ -f "$MT5_EXE" ] && { echo "MT5 installed"; break; }
+              kill -0 $WINE_PID 2>/dev/null || { echo "Installer exited"; break; }
+            done
+          else
+            echo "MT5 already installed (from cache)"
+          fi
+
+      # ── 8. Restore MT5 state from repo ──────────────────────────────────────
+      - name: Restore MT5 state from repo
+        run: |
+          MT5_DATA="$HOME/.wine/drive_c/Program Files/MetaTrader 5"
+          for dir in Experts Indicators Scripts; do
+            src="${GITHUB_WORKSPACE}/$dir"
+            dst="$MT5_DATA/MQL5/$dir"
+            if [ -d "$src" ]; then
+              mkdir -p "$dst"
+              rsync -a --delete "$src/" "$dst/"
+              echo "Restored $dir"
+            fi
+          done
+          if [ -d "${GITHUB_WORKSPACE}/Profiles" ]; then
+            mkdir -p "$MT5_DATA/Profiles"
+            rsync -a --delete "${GITHUB_WORKSPACE}/Profiles/" "$MT5_DATA/Profiles/"
+            echo "Restored Profiles"
+          fi
+
+      # ── 9. Launch MT5 ────────────────────────────────────────────────────────
+      - name: Launch MetaTrader 5
+        run: |
+          MT5_EXE="$HOME/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+          WINEARCH=win64 WINEPREFIX=~/.wine WINEDEBUG=-all wine "$MT5_EXE" &
+          sleep 5
+          echo "MetaTrader 5 launched"
+
+      # ── 10. VNC server ───────────────────────────────────────────────────────
+      - name: Start VNC server
+        run: |
+          pkill x11vnc 2>/dev/null || true
+          x11vnc \
+            -display :99 \
+            -rfbport "$VNC_PORT" \
+            -passwd  "$VNC_PASS" \
+            -forever -shared -noxdamage \
+            -bg -o /tmp/x11vnc.log
+          echo "VNC server running on port $VNC_PORT"
+
+      # ── 11. Ngrok tunnel + print address ─────────────────────────────────────
+      - name: Setup ngrok tunnel
+        env:
+          NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
+        run: |
+          # Install ngrok via official APT source
+          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc > /dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+            | sudo tee /etc/apt/sources.list.d/ngrok.list > /dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq ngrok
+
+          ngrok config add-authtoken "$NGROK_TOKEN"
+
+          pkill ngrok 2>/dev/null || true
+          nohup ngrok tcp "$VNC_PORT" > /tmp/ngrok.log 2>&1 &
+          sleep 5
+
+          VNC_ADDR=$(curl -s localhost:4040/api/tunnels \
+            | python3 -c "
+          import sys, json
+          tunnels = json.load(sys.stdin).get('tunnels', [])
+          if tunnels:
+              print(tunnels[0]['public_url'].replace('tcp://', ''))
+          else:
+              print('unavailable — check /tmp/ngrok.log')
+          " 2>/dev/null || echo "unavailable")
+
+          # Surface the address prominently in the workflow run UI
+          echo "::notice title=VNC Connection Ready::Address: $VNC_ADDR  |  Password: $VNC_PASS"
+          echo ""
+          echo "  ┌──────────────────────────────────────────────┐"
+          echo "  │  VNC address : $VNC_ADDR"
+          echo "  │  VNC password: $VNC_PASS"
+          echo "  └──────────────────────────────────────────────┘"
+          echo ""
+          echo "VNC_ADDR=$VNC_ADDR" >> "$GITHUB_ENV"
+
+      # ── 12. Session window ───────────────────────────────────────────────────
+      # The runner stays alive for the configured duration.
+      # To end early: cancel this workflow run from the GitHub Actions UI.
+      # The export step runs regardless (if: always()), so state is always saved.
+      - name: Session active — ${{ github.event.inputs.session_minutes || '90' }} minutes
+        run: |
+          MINS="${{ github.event.inputs.session_minutes || '90' }}"
+          echo "Session open for ${MINS} min."
+          echo "Connect via VNC to: $VNC_ADDR"
+          echo "Cancel this workflow run to end early — state will still be exported."
+          sleep $(( MINS * 60 ))
+
+      # ── 13. Export MT5 state back to GitHub ──────────────────────────────────
+      # Runs even if the session step is cancelled so state is never lost.
+      - name: Export MT5 state to GitHub
+        if: always()
+        run: |
+          MT5_DATA="$HOME/.wine/drive_c/Program Files/MetaTrader 5"
+
+          for dir in Experts Indicators Scripts; do
+            src="$MT5_DATA/MQL5/$dir"
+            dst="${GITHUB_WORKSPACE}/$dir"
+            if [ -d "$src" ]; then
+              mkdir -p "$dst"
+              rsync -a --delete "$src/" "$dst/"
+            fi
+          done
+
+          if [ -d "$MT5_DATA/Profiles" ]; then
+            mkdir -p "${GITHUB_WORKSPACE}/Profiles"
+            rsync -a --delete "$MT5_DATA/Profiles/" "${GITHUB_WORKSPACE}/Profiles/"
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add Experts Indicators Scripts Profiles 2>/dev/null || true
+
+          if git diff --staged --quiet; then
+            echo "No changes — nothing to export"
+          else
+            TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
+            git commit -m "chore: export MT5 state — ${TIMESTAMP}"
+            git push
+            echo "State exported to GitHub"
+          fi

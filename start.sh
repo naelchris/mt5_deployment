@@ -13,7 +13,7 @@ log() { echo "▶ $*"; }
 VNC_PORT="${VNC_PORT:-5900}"
 VNC_PASS="${VNC_PASS:-mt5vnc}"
 DISP="${DISP:-:99}"
-NGROK_TOKEN="1eqDDFA2XmhchLGZovN83Z27YrD_4YyD4xK98Jec8uj6Ag5o8"
+NGROK_TOKEN="${NGROK_TOKEN:-}"   # set via env or GitHub Secret — never hardcode
 MT5_URL="https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 MT5_SETUP="/tmp/mt5setup.exe"
 REPO_DIR="/tmp/mt5_deployment"
