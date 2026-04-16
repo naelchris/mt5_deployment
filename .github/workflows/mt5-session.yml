@@ -217,9 +217,12 @@ jobs:
           sleep $(( MINS * 60 ))
 
       # ── 13. Export MT5 state back to GitHub ──────────────────────────────────
-      # Runs even if the session step is cancelled so state is never lost.
+      # Pushes to a fresh branch and opens a PR — never touches main directly,
+      # so it can't conflict even if main moved forward during the session.
       - name: Export MT5 state to GitHub
         if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           MT5_DATA="$HOME/.wine/drive_c/Program Files/MetaTrader 5"
 
@@ -245,8 +248,18 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes — nothing to export"
           else
-            TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
+            TIMESTAMP=$(date -u '+%Y-%m-%dT%H%M')
+            BRANCH="mt5-state/${TIMESTAMP}"
+
+            git checkout -b "$BRANCH"
             git commit -m "chore: export MT5 state — ${TIMESTAMP}"
-            git push
-            echo "State exported to GitHub"
+            git push origin "$BRANCH"
+
+            gh pr create \
+              --title "MT5 state export — ${TIMESTAMP}" \
+              --body "Automated export from GitHub Actions run [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})." \
+              --base main \
+              --head "$BRANCH"
+
+            echo "PR opened for branch $BRANCH"
           fi
