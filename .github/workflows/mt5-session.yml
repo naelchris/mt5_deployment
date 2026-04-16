@@ -111,7 +111,7 @@ jobs:
           echo "Waiting for MT5 web interface (port 3000)..."
           for _i in $(seq 1 30); do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 || true)
-            if echo "$STATUS" | grep -qE "^(200|301|302)$"; then
+            if echo "$STATUS" | grep -qE "^(200|301|302|401)$"; then
               echo "MT5 web interface ready (HTTP $STATUS)"
               break
             fi
