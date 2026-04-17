@@ -265,18 +265,27 @@ jobs:
 
           # Terminal config: broker servers, templates, terminal.ini
           # .dat files hold encrypted account credentials — safe to commit
-          if [ -d "$MT5/config" ]; then
-            mkdir -p "${GITHUB_WORKSPACE}/MT5Config"
-            rsync -a --delete \
-              --exclude='*.log' \
-              "$MT5/config/" "${GITHUB_WORKSPACE}/MT5Config/"
-            echo "Synced MT5Config ($(ls "${GITHUB_WORKSPACE}/MT5Config/" | wc -l) files)"
-          else
-            echo "No MT5 config dir found at: $MT5/config"
-          fi
+          # Debug: show what dirs actually exist under the MT5 root
+          echo "=== MT5 root dirs ==="
+          ls -1 "$MT5/" 2>/dev/null || echo "MT5 root missing: $MT5"
 
-          # Stage everything and show what changed
-          git add MQL5/ Profiles/ MT5Config/
+          for cfg_dir in config Config cfg; do
+            if [ -d "$MT5/$cfg_dir" ]; then
+              mkdir -p "${GITHUB_WORKSPACE}/MT5Config"
+              rsync -a --delete \
+                --exclude='*.log' \
+                "$MT5/$cfg_dir/" "${GITHUB_WORKSPACE}/MT5Config/"
+              echo "Synced MT5Config from $cfg_dir/ ($(ls "${GITHUB_WORKSPACE}/MT5Config/" | wc -l) files)"
+              break
+            fi
+          done
+
+          # Stage only directories that actually exist — avoids git exit 128
+          # on missing paths which would abort the whole export
+          for d in MQL5 Profiles MT5Config; do
+            [ -d "${GITHUB_WORKSPACE}/$d" ] && git add "$d/"
+          done
+
           echo "=== git status ==="
           git status --short
 
