@@ -156,10 +156,11 @@ jobs:
             sleep 10
           done
 
-          # Phase 2: wait for terminal64.exe to actually be running inside Wine
+          # Phase 2: wait for terminal64.exe to appear in the container process list
+          # Uses docker top (host-side) — avoids needing pgrep inside the container
           echo "Phase 2: waiting for MT5 (terminal64.exe) to launch..."
           for _i in $(seq 1 24); do
-            if docker exec mt5 pgrep -f "terminal64.exe" > /dev/null 2>&1; then
+            if docker top mt5 2>/dev/null | grep -qi "terminal64"; then
               echo "MT5 process is running"
               break
             fi
