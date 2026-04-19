@@ -235,6 +235,11 @@ jobs:
         if: always()
         run: docker stop mt5 2>/dev/null || true
 
+      # Fix ownership so actions/cache and tar can read root-owned files written by the container.
+      - name: Fix config directory permissions
+        if: always()
+        run: sudo chown -R "$USER:$USER" ./config || true
+
       # ── 7. Push volume to GitHub Release ────────────────────────────────────
       # Tars the entire ./config directory and uploads it to a rolling release
       # tag "mt5-state-latest". This survives cache eviction and is always the
@@ -250,6 +255,7 @@ jobs:
           fi
 
           echo "Compressing ./config (this may take a few minutes)..."
+          sudo rm -f /tmp/mt5-config.tar.gz
           sudo tar czf /tmp/mt5-config.tar.gz -C "$(pwd)" config
           SIZE=$(du -sh /tmp/mt5-config.tar.gz | cut -f1)
           echo "Tarball size: $SIZE"
