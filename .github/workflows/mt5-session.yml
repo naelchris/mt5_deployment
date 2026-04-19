@@ -34,7 +34,7 @@ on:
 jobs:
   mt5-session:
     runs-on: ${{ github.event.inputs.runner_size || 'ubuntu-latest' }}
-    timeout-minutes: 120
+    timeout-minutes: 150
 
     permissions:
       contents: read
@@ -63,12 +63,15 @@ jobs:
       # already has Wine + MT5 fully installed, so startup is much faster.
       - name: Pull MT5 image
         run: |
-          if docker pull "$MT5_IMAGE" 2>/dev/null; then
-            echo "Using saved image from GHCR: $MT5_IMAGE"
+          echo "Attempting to pull saved image: $MT5_IMAGE"
+          PULL_OUTPUT=$(docker pull "$MT5_IMAGE" 2>&1) && PULL_OK=1 || PULL_OK=0
+          echo "$PULL_OUTPUT"
+          if [ "$PULL_OK" = "1" ]; then
+            echo "::notice::Using saved GHCR image — state from previous session restored"
             echo "ACTIVE_IMAGE=$MT5_IMAGE" >> "$GITHUB_ENV"
           else
             BASE="gmag11/metatrader5_vnc:latest"
-            echo "No saved image found — pulling base image: $BASE"
+            echo "::notice::No saved GHCR image found (first run, or previous push failed) — pulling base image"
             docker pull "$BASE"
             echo "ACTIVE_IMAGE=$BASE" >> "$GITHUB_ENV"
           fi
@@ -204,14 +207,23 @@ jobs:
       # Runs even on cancellation so the session state is never lost.
       # docker commit snapshots the live container filesystem (Wine prefix,
       # MT5 install, EA files, broker config, everything) into a new image layer.
+      #
+      # NOTE: on cancellation GitHub gives only ~5 min grace period. The FIRST
+      # push is large (~4 GB). Let sessions expire naturally on the first run,
+      # or don't cancel until the push completes. Subsequent pushes are fast
+      # because only changed layers need to be uploaded.
       - name: Export container to GHCR
         if: always()
+        timeout-minutes: 20
         run: |
-          echo "Committing container state..."
+          echo "Committing container state to image..."
           docker commit mt5 "$MT5_IMAGE"
-          echo "Pushing $MT5_IMAGE to GHCR..."
-          docker push "$MT5_IMAGE"
-          echo "Done — next run will start from this image"
+          echo "Pushing to GHCR — this may take several minutes on first run..."
+          if docker push "$MT5_IMAGE"; then
+            echo "::notice::State saved to GHCR — next run will resume from this snapshot"
+          else
+            echo "::error::Push to GHCR FAILED — session state was NOT saved. Next run will start fresh."
+          fi
 
       # ── 8. Stop container ────────────────────────────────────────────────────
       - name: Stop MT5 container
