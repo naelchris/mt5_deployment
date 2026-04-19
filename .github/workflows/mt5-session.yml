@@ -137,20 +137,20 @@ jobs:
             sleep 10
           done
 
-          # Phase 2: terminal64.exe (up to 10 min — cold Wine install can be slow)
+          # Phase 2: terminal64.exe (up to 25 min — cold Wine+MT5 install can be very slow)
           echo "Phase 2: waiting for terminal64.exe..."
           MT5_FOUND=0
-          for _i in $(seq 1 60); do
+          for _i in $(seq 1 150); do
             if docker top mt5 2>/dev/null | grep -qi "terminal64"; then
               echo "MT5 process is running (after $(( _i * 10 )) s)"
               MT5_FOUND=1
               break
             fi
-            echo "  MT5 not yet running, waiting 10 s... ($_i/60)"
+            echo "  MT5 not yet running, waiting 10 s... ($_i/150)"
             sleep 10
           done
           if [ "$MT5_FOUND" = "0" ]; then
-            echo "::warning::terminal64.exe not detected after 10 min — dumping container state"
+            echo "::warning::terminal64.exe not detected after 25 min — dumping container state"
             echo "=== docker top mt5 ==="
             docker top mt5 2>/dev/null || echo "(docker top failed)"
             echo "=== docker logs (last 40 lines) ==="
