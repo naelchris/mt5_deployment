@@ -6,6 +6,10 @@ name: MT5 Trading Session
 # Required secrets:  NGROK_TOKEN
 # Optional secrets:  MT5_USER   (default: "user")
 #                    MT5_PASS   (default: "mt5pass")
+#
+# State is persisted by committing the running container to GHCR after each
+# session. On the next run the pre-built image is pulled (fast) instead of
+# doing a full Wine + MT5 install from scratch.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -33,98 +37,47 @@ jobs:
     timeout-minutes: 120
 
     permissions:
-      contents: write
+      contents: read
+      packages: write   # required to push to GHCR
 
     env:
       MT5_USER: ${{ secrets.MT5_USER || 'user' }}
       MT5_PASS: ${{ secrets.MT5_PASS || 'mt5pass' }}
-      # Root of the MT5 install inside the cached Wine volume
-      MT5_ROOT: './config/.wine/drive_c/Program Files/MetaTrader 5'
+      # Saved image lives in GHCR under this repo's owner
+      MT5_IMAGE: ghcr.io/${{ github.repository_owner }}/mt5-session:latest
 
     steps:
       # ── 0. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 1a. Cache the Docker image (~4 GB) ───────────────────────────────────
-      # Saves a docker save tarball so subsequent runs skip the Docker Hub pull.
-      # Bump the key suffix to force a fresh pull of a newer image version.
-      - name: Restore Docker image cache
-        id: cache-image
-        uses: actions/cache@v4
-        with:
-          path: /tmp/mt5-image.tar
-          key: mt5-docker-image-v1
-
-      - name: Load or pull Docker image
+      # ── 1. Login to GitHub Container Registry ────────────────────────────────
+      - name: Login to GHCR
         run: |
-          if [ -f /tmp/mt5-image.tar ]; then
-            echo "Loading image from cache..."
-            docker load < /tmp/mt5-image.tar
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # ── 2. Pull saved image or fall back to upstream base ────────────────────
+      # On first run (no saved image yet) we pull the upstream base image.
+      # On subsequent runs we pull the committed image from GHCR — this
+      # already has Wine + MT5 fully installed, so startup is much faster.
+      - name: Pull MT5 image
+        run: |
+          if docker pull "$MT5_IMAGE" 2>/dev/null; then
+            echo "Using saved image from GHCR: $MT5_IMAGE"
+            echo "ACTIVE_IMAGE=$MT5_IMAGE" >> "$GITHUB_ENV"
           else
-            echo "Pulling image from Docker Hub..."
-            docker pull gmag11/metatrader5_vnc:latest
-            echo "Saving image to cache..."
-            docker save gmag11/metatrader5_vnc:latest > /tmp/mt5-image.tar
+            BASE="gmag11/metatrader5_vnc:latest"
+            echo "No saved image found — pulling base image: $BASE"
+            docker pull "$BASE"
+            echo "ACTIVE_IMAGE=$BASE" >> "$GITHUB_ENV"
           fi
 
-      # ── 1b. Cache the Docker /config volume ──────────────────────────────────
-      # The /config volume holds the Wine prefix + MT5 installation (~1-2 GB).
-      # On warm runs the container skips the full install and starts in seconds.
-      # Bump the key suffix (v1 → v2 …) to force a clean install.
-      - name: Restore MT5 config cache
-        id: cache-config
-        uses: actions/cache@v4
-        with:
-          path: ./config
-          key: mt5-docker-config-${{ runner.os }}-v1
-
-      # ── 2. Inject saved MT5 state from repo into the config volume ───────────
-      # Restores MQL5 source files, EA data files, profiles AND terminal config.
-      - name: Restore MT5 state from repo
-        run: |
-          MT5="${{ env.MT5_ROOT }}"
-
-          # MQL5 source directories
-          for dir in Experts Indicators Scripts Libraries; do
-            src="${GITHUB_WORKSPACE}/MQL5/$dir"
-            dst="$MT5/MQL5/$dir"
-            if [ -d "$src" ]; then
-              mkdir -p "$dst"
-              rsync -a --delete "$src/" "$dst/"
-              echo "Restored MQL5/$dir"
-            fi
-          done
-
-          # EA runtime data files
-          if [ -d "${GITHUB_WORKSPACE}/MQL5/Files" ]; then
-            mkdir -p "$MT5/MQL5/Files"
-            rsync -a --delete "${GITHUB_WORKSPACE}/MQL5/Files/" "$MT5/MQL5/Files/"
-            echo "Restored MQL5/Files"
-          fi
-
-          # Chart profiles / layouts
-          if [ -d "${GITHUB_WORKSPACE}/Profiles" ]; then
-            mkdir -p "$MT5/Profiles"
-            rsync -a --delete "${GITHUB_WORKSPACE}/Profiles/" "$MT5/Profiles/"
-            echo "Restored Profiles"
-          fi
-
-          # Terminal config (broker servers, templates, terminal.ini)
-          if [ -d "${GITHUB_WORKSPACE}/MT5Config" ]; then
-            mkdir -p "$MT5/config"
-            rsync -a --delete "${GITHUB_WORKSPACE}/MT5Config/" "$MT5/config/"
-            echo "Restored MT5Config"
-          fi
-
-      # ── 3. Start MT5 Docker container ────────────────────────────────────────
+      # ── 3. Start MT5 container ───────────────────────────────────────────────
       # Port 3000 → KasmVNC web UI  (browser access, no VNC client needed)
       # Port 8001 → mt5linux RPyC   (Python MetaTrader5 API)
       - name: Start MT5 container
         run: |
-          # Give the container all CPUs and leave ~1 GB for the runner OS
           TOTAL_MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
           CONTAINER_MEM_MB=$(( TOTAL_MEM_MB - 1024 ))
           echo "Runner: $(nproc) vCPU, ${TOTAL_MEM_MB} MB RAM → giving container $(nproc) vCPU, ${CONTAINER_MEM_MB} MB"
@@ -135,13 +88,12 @@ jobs:
             --memory="${CONTAINER_MEM_MB}m" \
             -p 3000:3000 \
             -p 8001:8001 \
-            -v "$(pwd)/config:/config" \
             -e CUSTOM_USER="${MT5_USER}" \
             -e PASSWORD="${MT5_PASS}" \
-            gmag11/metatrader5_vnc:latest
-          echo "Container started"
+            "$ACTIVE_IMAGE"
+          echo "Container started from $ACTIVE_IMAGE"
 
-      # ── 4. Wait for KasmVNC + MT5 process to be ready ───────────────────────
+      # ── 4. Wait for KasmVNC + MT5 to be ready ───────────────────────────────
       - name: Wait for MT5 to be ready
         run: |
           # Phase 1: wait for KasmVNC web server (port 3000)
@@ -156,9 +108,8 @@ jobs:
             sleep 10
           done
 
-          # Phase 2: wait for terminal64.exe to appear in the container process list
-          # Uses docker top (host-side) — avoids needing pgrep inside the container
-          echo "Phase 2: waiting for MT5 (terminal64.exe) to launch..."
+          # Phase 2: wait for terminal64.exe (up to 10 min)
+          echo "Phase 2: waiting for terminal64.exe..."
           MT5_FOUND=0
           for _i in $(seq 1 60); do
             if docker top mt5 2>/dev/null | grep -qi "terminal64"; then
@@ -173,29 +124,26 @@ jobs:
             echo "::warning::terminal64.exe not detected after 10 min — dumping container state"
             echo "=== docker top mt5 ==="
             docker top mt5 2>/dev/null || echo "(docker top failed)"
-            echo "=== docker logs (last 30 lines) ==="
-            docker logs --tail 30 mt5 2>&1 || true
+            echo "=== docker logs (last 40 lines) ==="
+            docker logs --tail 40 mt5 2>&1 || true
           fi
 
-          # Phase 3: wait for a window manager process (openbox/fluxbox/xfwm4)
-          # to confirm the X desktop is up, then add a buffer for MT5 to render
-          echo "Phase 3: waiting for window manager to start..."
+          # Phase 3: wait for window manager (confirms X desktop is up)
+          echo "Phase 3: waiting for window manager..."
           for _i in $(seq 1 18); do
             if docker top mt5 2>/dev/null | grep -qiE "openbox|fluxbox|xfwm|jwm|i3|metacity"; then
-              echo "Window manager is running ($_i)"
+              echo "Window manager running"
               break
             fi
             echo "  WM not yet running, waiting 5 s... ($_i/18)"
             sleep 5
           done
 
-          echo "Phase 4: waiting 30 s for MT5 UI to finish rendering..."
+          echo "Phase 4: 30 s render buffer..."
           sleep 30
           echo "MT5 ready — connect via browser"
 
       # ── 5. Ngrok HTTP tunnel ─────────────────────────────────────────────────
-      # HTTP tunnel on port 3000 — works on ngrok free plan.
-      # KasmVNC serves a full browser-based MT5 desktop at this URL.
       - name: Setup ngrok tunnel
         env:
           NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
@@ -209,7 +157,6 @@ jobs:
           ngrok config add-authtoken "$NGROK_TOKEN"
           nohup ngrok http 3000 > /tmp/ngrok.log 2>&1 &
 
-          # Poll until HTTPS URL is available (up to ~40 s)
           MT5_URL=""
           for _i in $(seq 1 13); do
             sleep 3
@@ -246,9 +193,6 @@ jobs:
           echo "MT5_URL=$MT5_URL" >> "$GITHUB_ENV"
 
       # ── 6. Session window ────────────────────────────────────────────────────
-      # Runner stays alive for the configured duration.
-      # Cancel this workflow run from the GitHub Actions UI to end early.
-      # The export step below runs regardless (if: always()).
       - name: Session active — ${{ github.event.inputs.session_minutes || '90' }} minutes
         run: |
           MINS="${{ github.event.inputs.session_minutes || '90' }}"
@@ -256,85 +200,18 @@ jobs:
           echo "Cancel this workflow run to end early — state will still be exported."
           sleep $(( MINS * 60 ))
 
-      # ── 7. Export MT5 state back to GitHub ───────────────────────────────────
-      # Runs even on cancellation (if: always()).
-      # Pulls latest main first to avoid conflicts, then pushes directly.
-      - name: Export MT5 state to GitHub
+      # ── 7. Commit container → push to GHCR ──────────────────────────────────
+      # Runs even on cancellation so the session state is never lost.
+      # docker commit snapshots the live container filesystem (Wine prefix,
+      # MT5 install, EA files, broker config, everything) into a new image layer.
+      - name: Export container to GHCR
         if: always()
         run: |
-          MT5="${{ env.MT5_ROOT }}"
-
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Get back onto main and pull latest before we write anything
-          git checkout main
-          git pull origin main --ff-only
-
-          cd "${GITHUB_WORKSPACE}"
-
-          # ── MQL5 source files ───────────────────────────────────────────────
-          for dir in Experts Indicators Scripts Libraries; do
-            src="$MT5/MQL5/$dir"
-            dst="${GITHUB_WORKSPACE}/MQL5/$dir"
-            if [ -d "$src" ]; then
-              mkdir -p "$dst"
-              # No pipe — piping to head sends SIGPIPE which kills rsync early
-              rsync -a --delete "$src/" "$dst/"
-              echo "Synced MQL5/$dir ($(find "$dst" -type f | wc -l) files)"
-            else
-              echo "Skipped MQL5/$dir — not found in container"
-            fi
-          done
-
-          # EA runtime data files
-          if [ -d "$MT5/MQL5/Files" ]; then
-            mkdir -p "${GITHUB_WORKSPACE}/MQL5/Files"
-            rsync -a --delete "$MT5/MQL5/Files/" "${GITHUB_WORKSPACE}/MQL5/Files/"
-            echo "Synced MQL5/Files"
-          fi
-
-          # Chart profiles / layouts
-          if [ -d "$MT5/Profiles" ]; then
-            mkdir -p "${GITHUB_WORKSPACE}/Profiles"
-            rsync -a --delete "$MT5/Profiles/" "${GITHUB_WORKSPACE}/Profiles/"
-            echo "Synced Profiles"
-          fi
-
-          # Terminal config: broker servers, templates, terminal.ini
-          # .dat files hold encrypted account credentials — safe to commit
-          # Debug: show what dirs actually exist under the MT5 root
-          echo "=== MT5 root dirs ==="
-          ls -1 "$MT5/" 2>/dev/null || echo "MT5 root missing: $MT5"
-
-          for cfg_dir in config Config cfg; do
-            if [ -d "$MT5/$cfg_dir" ]; then
-              mkdir -p "${GITHUB_WORKSPACE}/MT5Config"
-              rsync -a --delete \
-                --exclude='*.log' \
-                "$MT5/$cfg_dir/" "${GITHUB_WORKSPACE}/MT5Config/"
-              echo "Synced MT5Config from $cfg_dir/ ($(ls "${GITHUB_WORKSPACE}/MT5Config/" | wc -l) files)"
-              break
-            fi
-          done
-
-          # Stage only directories that actually exist — avoids git exit 128
-          # on missing paths which would abort the whole export
-          for d in MQL5 Profiles MT5Config; do
-            [ -d "${GITHUB_WORKSPACE}/$d" ] && git add "$d/"
-          done
-
-          echo "=== git status ==="
-          git status --short
-
-          if git diff --staged --quiet; then
-            echo "No changes — nothing to export"
-          else
-            TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
-            git commit -m "chore: export MT5 state — ${TIMESTAMP}"
-            git push origin main
-            echo "State exported to main"
-          fi
+          echo "Committing container state..."
+          docker commit mt5 "$MT5_IMAGE"
+          echo "Pushing $MT5_IMAGE to GHCR..."
+          docker push "$MT5_IMAGE"
+          echo "Done — next run will start from this image"
 
       # ── 8. Stop container ────────────────────────────────────────────────────
       - name: Stop MT5 container
