@@ -7,9 +7,9 @@ name: MT5 Trading Session
 # Optional secrets:  MT5_USER   (default: "user")
 #                    MT5_PASS   (default: "mt5pass")
 #
-# State is persisted by committing the running container to GHCR after each
-# session. On the next run the pre-built image is pulled (fast) instead of
-# doing a full Wine + MT5 install from scratch.
+# State is persisted via the /config bind-mount cached with actions/cache.
+# A unique key per run (+ restore-keys prefix) ensures the cache always saves
+# and the next run restores the most recent session's state.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -37,48 +37,73 @@ jobs:
     timeout-minutes: 150
 
     permissions:
-      contents: read
-      packages: write   # required to push to GHCR
+      contents: write   # needed to create/update GitHub Releases
 
     env:
       MT5_USER: ${{ secrets.MT5_USER || 'user' }}
       MT5_PASS: ${{ secrets.MT5_PASS || 'mt5pass' }}
-      # Saved image lives in GHCR under this repo's owner
-      MT5_IMAGE: ghcr.io/${{ github.repository_owner }}/mt5-session:latest
+      MT5_ROOT: './config/.wine/drive_c/Program Files/MetaTrader 5'
 
     steps:
       # ── 0. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 1. Login to GitHub Container Registry ────────────────────────────────
-      - name: Login to GHCR
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" \
-            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      # ── 1a. Cache the Docker image ───────────────────────────────────────────
+      # Fixed key is fine here — the image itself doesn't change between runs.
+      - name: Restore Docker image cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/mt5-image.tar
+          key: mt5-docker-image-v1
 
-      # ── 2. Pull saved image or fall back to upstream base ────────────────────
-      # On first run (no saved image yet) we pull the upstream base image.
-      # On subsequent runs we pull the committed image from GHCR — this
-      # already has Wine + MT5 fully installed, so startup is much faster.
-      - name: Pull MT5 image
+      - name: Load or pull Docker image
         run: |
-          echo "Attempting to pull saved image: $MT5_IMAGE"
-          PULL_OUTPUT=$(docker pull "$MT5_IMAGE" 2>&1) && PULL_OK=1 || PULL_OK=0
-          echo "$PULL_OUTPUT"
-          if [ "$PULL_OK" = "1" ]; then
-            echo "::notice::Using saved GHCR image — state from previous session restored"
-            echo "ACTIVE_IMAGE=$MT5_IMAGE" >> "$GITHUB_ENV"
+          if [ -f /tmp/mt5-image.tar ]; then
+            echo "Loading image from cache..."
+            docker load < /tmp/mt5-image.tar
           else
-            BASE="gmag11/metatrader5_vnc:latest"
-            echo "::notice::No saved GHCR image found (first run, or previous push failed) — pulling base image"
-            docker pull "$BASE"
-            echo "ACTIVE_IMAGE=$BASE" >> "$GITHUB_ENV"
+            echo "Pulling image from Docker Hub..."
+            docker pull gmag11/metatrader5_vnc:latest
+            docker save gmag11/metatrader5_vnc:latest > /tmp/mt5-image.tar
           fi
 
-      # ── 3. Start MT5 container ───────────────────────────────────────────────
-      # Port 3000 → KasmVNC web UI  (browser access, no VNC client needed)
-      # Port 8001 → mt5linux RPyC   (Python MetaTrader5 API)
+      # ── 1b. Mutable config cache (fast path) ────────────────────────────────
+      # Unique key per run so the post-step always saves; restore-keys finds
+      # the most recent entry. If the cache was evicted (>7 days), the next
+      # step downloads the full tarball from the GitHub Release instead.
+      - name: Restore MT5 config cache
+        uses: actions/cache@v4
+        with:
+          path: ./config
+          key: mt5-config-${{ runner.os }}-run-${{ github.run_id }}
+          restore-keys: |
+            mt5-config-${{ runner.os }}-run-
+
+      # ── 1c. Fallback — restore from GitHub Release if cache is cold ──────────
+      - name: Restore MT5 volume from GitHub Release (cache-miss fallback)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -d "./config/.wine" ]; then
+            echo "Cache hit — skipping release download"
+          else
+            echo "Cache miss — attempting to download saved volume from GitHub Release..."
+            if gh release download mt5-state-latest \
+                --pattern "mt5-config.tar.gz" \
+                --dir /tmp \
+                --repo "${{ github.repository }}" 2>/dev/null; then
+              echo "Extracting volume tarball..."
+              tar xzf /tmp/mt5-config.tar.gz -C "$(pwd)"
+              echo "Volume restored from GitHub Release ($(du -sh ./config | cut -f1))"
+            else
+              echo "No saved release found — starting fresh (first run)"
+            fi
+          fi
+
+      # ── 2. Start MT5 container ───────────────────────────────────────────────
+      # The /config bind-mount is critical: all persistent state (Wine prefix,
+      # MT5 install, account data) lives on the host so it survives restarts.
       - name: Start MT5 container
         run: |
           TOTAL_MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
@@ -91,15 +116,16 @@ jobs:
             --memory="${CONTAINER_MEM_MB}m" \
             -p 3000:3000 \
             -p 8001:8001 \
+            -v "$(pwd)/config:/config" \
             -e CUSTOM_USER="${MT5_USER}" \
             -e PASSWORD="${MT5_PASS}" \
-            "$ACTIVE_IMAGE"
-          echo "Container started from $ACTIVE_IMAGE"
+            gmag11/metatrader5_vnc:latest
+          echo "Container started"
 
-      # ── 4. Wait for KasmVNC + MT5 to be ready ───────────────────────────────
+      # ── 3. Wait for KasmVNC + MT5 to be ready ───────────────────────────────
       - name: Wait for MT5 to be ready
         run: |
-          # Phase 1: wait for KasmVNC web server (port 3000)
+          # Phase 1: KasmVNC web server
           echo "Phase 1: waiting for KasmVNC web server..."
           for _i in $(seq 1 30); do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 || true)
@@ -111,7 +137,7 @@ jobs:
             sleep 10
           done
 
-          # Phase 2: wait for terminal64.exe (up to 10 min)
+          # Phase 2: terminal64.exe (up to 10 min — cold Wine install can be slow)
           echo "Phase 2: waiting for terminal64.exe..."
           MT5_FOUND=0
           for _i in $(seq 1 60); do
@@ -131,7 +157,7 @@ jobs:
             docker logs --tail 40 mt5 2>&1 || true
           fi
 
-          # Phase 3: wait for window manager (confirms X desktop is up)
+          # Phase 3: window manager (confirms X desktop is up)
           echo "Phase 3: waiting for window manager..."
           for _i in $(seq 1 18); do
             if docker top mt5 2>/dev/null | grep -qiE "openbox|fluxbox|xfwm|jwm|i3|metacity"; then
@@ -146,7 +172,7 @@ jobs:
           sleep 30
           echo "MT5 ready — connect via browser"
 
-      # ── 5. Ngrok HTTP tunnel ─────────────────────────────────────────────────
+      # ── 4. Ngrok HTTP tunnel ─────────────────────────────────────────────────
       - name: Setup ngrok tunnel
         env:
           NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
@@ -195,37 +221,52 @@ jobs:
           echo ""
           echo "MT5_URL=$MT5_URL" >> "$GITHUB_ENV"
 
-      # ── 6. Session window ────────────────────────────────────────────────────
+      # ── 5. Session window ────────────────────────────────────────────────────
       - name: Session active — ${{ github.event.inputs.session_minutes || '90' }} minutes
         run: |
           MINS="${{ github.event.inputs.session_minutes || '90' }}"
           echo "Session open for ${MINS} min. MT5 browser URL: $MT5_URL"
-          echo "Cancel this workflow run to end early — state will still be exported."
+          echo "Cancel this workflow run to end early — state will still be saved."
           sleep $(( MINS * 60 ))
 
-      # ── 7. Commit container → push to GHCR ──────────────────────────────────
-      # Runs even on cancellation so the session state is never lost.
-      # docker commit snapshots the live container filesystem (Wine prefix,
-      # MT5 install, EA files, broker config, everything) into a new image layer.
-      #
-      # NOTE: on cancellation GitHub gives only ~5 min grace period. The FIRST
-      # push is large (~4 GB). Let sessions expire naturally on the first run,
-      # or don't cancel until the push completes. Subsequent pushes are fast
-      # because only changed layers need to be uploaded.
-      - name: Export container to GHCR
-        if: always()
-        timeout-minutes: 20
-        run: |
-          echo "Committing container state to image..."
-          docker commit mt5 "$MT5_IMAGE"
-          echo "Pushing to GHCR — this may take several minutes on first run..."
-          if docker push "$MT5_IMAGE"; then
-            echo "::notice::State saved to GHCR — next run will resume from this snapshot"
-          else
-            echo "::error::Push to GHCR FAILED — session state was NOT saved. Next run will start fresh."
-          fi
-
-      # ── 8. Stop container ────────────────────────────────────────────────────
+      # ── 6. Stop container ────────────────────────────────────────────────────
+      # Stop first so MT5 flushes all data to ./config before we tar it.
       - name: Stop MT5 container
         if: always()
         run: docker stop mt5 2>/dev/null || true
+
+      # ── 7. Push volume to GitHub Release ────────────────────────────────────
+      # Tars the entire ./config directory and uploads it to a rolling release
+      # tag "mt5-state-latest". This survives cache eviction and is always the
+      # source of truth for the full volume state.
+      - name: Push MT5 volume to GitHub Release
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -d "./config/.wine" ]; then
+            echo "No config volume found — nothing to push"
+            exit 0
+          fi
+
+          echo "Compressing ./config (this may take a few minutes)..."
+          tar czf /tmp/mt5-config.tar.gz -C "$(pwd)" config
+          SIZE=$(du -sh /tmp/mt5-config.tar.gz | cut -f1)
+          echo "Tarball size: $SIZE"
+
+          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
+
+          # Delete old release and recreate (keeps only latest snapshot)
+          gh release delete mt5-state-latest --yes \
+            --repo "${{ github.repository }}" 2>/dev/null || true
+
+          gh release create mt5-state-latest \
+            --repo "${{ github.repository }}" \
+            --title "MT5 Volume — ${TIMESTAMP}" \
+            --notes "Full /config volume snapshot. Restored automatically on next workflow run." \
+            --prerelease \
+            /tmp/mt5-config.tar.gz
+
+          echo "Volume pushed to GitHub Release mt5-state-latest (${SIZE})"
+
+      # actions/cache post-step saves ./config automatically after all steps.
