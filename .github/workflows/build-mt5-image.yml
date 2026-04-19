@@ -1,0 +1,77 @@
+name: Build Pre-installed MT5 Image
+
+# Run this once to bake a Wine+MT5 install into a GHCR image.
+# After it succeeds, the session workflow pulls this image and starts MT5
+# in seconds instead of waiting 15-25 minutes for a cold install.
+#
+# Re-run whenever you want to refresh the MT5 version in the base image.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    permissions:
+      contents: read
+      packages: write   # needed to push to GHCR
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull base image
+        run: docker pull gmag11/metatrader5_vnc:latest
+
+      # Start without a bind-mount so MT5 installs into the container filesystem.
+      - name: Start container for MT5 installation
+        run: |
+          docker run -d \
+            --name mt5-build \
+            -e CUSTOM_USER=user \
+            -e PASSWORD=mt5pass \
+            gmag11/metatrader5_vnc:latest
+          echo "Container started — waiting for Wine+MT5 to install..."
+
+      # Poll until terminal64.exe appears — that confirms the full install is done.
+      - name: Wait for MT5 installation to complete
+        run: |
+          for _i in $(seq 1 180); do
+            if docker top mt5-build 2>/dev/null | grep -qi "terminal64"; then
+              echo "MT5 is running — install complete (after $(( _i * 10 )) s)"
+              exit 0
+            fi
+            echo "  waiting... ($_i/180, $(( _i * 10 )) s elapsed)"
+            sleep 10
+          done
+          echo "::error::MT5 did not start within 30 minutes"
+          docker logs --tail 60 mt5-build 2>&1 || true
+          exit 1
+
+      # Stop cleanly so Wine flushes all state to /config before we copy it.
+      - name: Stop container
+        run: docker stop mt5-build
+
+      # Pull /config out of the stopped container — this becomes the image seed.
+      - name: Extract pre-installed config
+        run: |
+          mkdir -p config-base
+          docker cp mt5-build:/config/. ./config-base/
+          echo "Extracted $(du -sh ./config-base | cut -f1) into config-base/"
+
+      - name: Build and push image to GHCR
+        run: |
+          IMAGE=ghcr.io/${{ github.repository }}:latest
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "Pushed $IMAGE"
+          echo "::notice title=Image ready::$IMAGE"

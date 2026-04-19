@@ -38,6 +38,7 @@ jobs:
 
     permissions:
       contents: write   # needed to create/update GitHub Releases
+      packages: read    # needed to pull from GHCR
 
     env:
       MT5_USER: ${{ secrets.MT5_USER || 'user' }}
@@ -50,22 +51,29 @@ jobs:
         uses: actions/checkout@v4
 
       # ── 1a. Cache the Docker image ───────────────────────────────────────────
-      # Fixed key is fine here — the image itself doesn't change between runs.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Restore Docker image cache
         uses: actions/cache@v4
         with:
           path: /tmp/mt5-image.tar
-          key: mt5-docker-image-v1
+          key: mt5-docker-image-prebuilt-v1
 
       - name: Load or pull Docker image
         run: |
+          IMAGE=ghcr.io/${{ github.repository }}:latest
           if [ -f /tmp/mt5-image.tar ]; then
             echo "Loading image from cache..."
             docker load < /tmp/mt5-image.tar
           else
-            echo "Pulling image from Docker Hub..."
-            docker pull gmag11/metatrader5_vnc:latest
-            docker save gmag11/metatrader5_vnc:latest > /tmp/mt5-image.tar
+            echo "Pulling pre-built image from GHCR..."
+            docker pull "$IMAGE"
+            docker save "$IMAGE" > /tmp/mt5-image.tar
           fi
 
       # ── 1b. Mutable config cache (fast path) ────────────────────────────────
@@ -119,7 +127,7 @@ jobs:
             -v "$(pwd)/config:/config" \
             -e CUSTOM_USER="${MT5_USER}" \
             -e PASSWORD="${MT5_PASS}" \
-            gmag11/metatrader5_vnc:latest
+            ghcr.io/${{ github.repository }}:latest
           echo "Container started"
 
       # ── 3. Wait for KasmVNC + MT5 to be ready ───────────────────────────────
@@ -137,20 +145,21 @@ jobs:
             sleep 10
           done
 
-          # Phase 2: terminal64.exe (up to 25 min — cold Wine+MT5 install can be very slow)
+          # Phase 2: terminal64.exe
+          # With the pre-built image the seed copy takes seconds; allow up to 5 min.
           echo "Phase 2: waiting for terminal64.exe..."
           MT5_FOUND=0
-          for _i in $(seq 1 150); do
+          for _i in $(seq 1 30); do
             if docker top mt5 2>/dev/null | grep -qi "terminal64"; then
               echo "MT5 process is running (after $(( _i * 10 )) s)"
               MT5_FOUND=1
               break
             fi
-            echo "  MT5 not yet running, waiting 10 s... ($_i/150)"
+            echo "  MT5 not yet running, waiting 10 s... ($_i/30)"
             sleep 10
           done
           if [ "$MT5_FOUND" = "0" ]; then
-            echo "::warning::terminal64.exe not detected after 25 min — dumping container state"
+            echo "::warning::terminal64.exe not detected after 5 min — dumping container state"
             echo "=== docker top mt5 ==="
             docker top mt5 2>/dev/null || echo "(docker top failed)"
             echo "=== docker logs (last 40 lines) ==="
