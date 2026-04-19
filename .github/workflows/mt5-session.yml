@@ -94,7 +94,7 @@ jobs:
                 --dir /tmp \
                 --repo "${{ github.repository }}" 2>/dev/null; then
               echo "Extracting volume tarball..."
-              tar xzf /tmp/mt5-config.tar.gz -C "$(pwd)"
+              sudo tar xzf /tmp/mt5-config.tar.gz -C "$(pwd)"
               echo "Volume restored from GitHub Release ($(du -sh ./config | cut -f1))"
             else
               echo "No saved release found — starting fresh (first run)"
@@ -250,7 +250,7 @@ jobs:
           fi
 
           echo "Compressing ./config (this may take a few minutes)..."
-          tar czf /tmp/mt5-config.tar.gz -C "$(pwd)" config
+          sudo tar czf /tmp/mt5-config.tar.gz -C "$(pwd)" config
           SIZE=$(du -sh /tmp/mt5-config.tar.gz | cut -f1)
           echo "Tarball size: $SIZE"
 
