@@ -159,18 +159,38 @@ jobs:
           # Phase 2: wait for terminal64.exe to appear in the container process list
           # Uses docker top (host-side) — avoids needing pgrep inside the container
           echo "Phase 2: waiting for MT5 (terminal64.exe) to launch..."
-          for _i in $(seq 1 24); do
+          MT5_FOUND=0
+          for _i in $(seq 1 60); do
             if docker top mt5 2>/dev/null | grep -qi "terminal64"; then
-              echo "MT5 process is running"
+              echo "MT5 process is running (after $(( _i * 10 )) s)"
+              MT5_FOUND=1
               break
             fi
-            echo "  MT5 not yet running, waiting 10 s... ($_i/24)"
+            echo "  MT5 not yet running, waiting 10 s... ($_i/60)"
             sleep 10
           done
+          if [ "$MT5_FOUND" = "0" ]; then
+            echo "::warning::terminal64.exe not detected after 10 min — dumping container state"
+            echo "=== docker top mt5 ==="
+            docker top mt5 2>/dev/null || echo "(docker top failed)"
+            echo "=== docker logs (last 30 lines) ==="
+            docker logs --tail 30 mt5 2>&1 || true
+          fi
 
-          # Phase 3: give MT5 extra time to finish rendering its UI
-          echo "Phase 3: waiting 20 s for MT5 UI to finish rendering..."
-          sleep 20
+          # Phase 3: wait for a window manager process (openbox/fluxbox/xfwm4)
+          # to confirm the X desktop is up, then add a buffer for MT5 to render
+          echo "Phase 3: waiting for window manager to start..."
+          for _i in $(seq 1 18); do
+            if docker top mt5 2>/dev/null | grep -qiE "openbox|fluxbox|xfwm|jwm|i3|metacity"; then
+              echo "Window manager is running ($_i)"
+              break
+            fi
+            echo "  WM not yet running, waiting 5 s... ($_i/18)"
+            sleep 5
+          done
+
+          echo "Phase 4: waiting 30 s for MT5 UI to finish rendering..."
+          sleep 30
           echo "MT5 ready — connect via browser"
 
       # ── 5. Ngrok HTTP tunnel ─────────────────────────────────────────────────
