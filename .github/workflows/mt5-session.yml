@@ -50,7 +50,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 1a. Cache the Docker image ───────────────────────────────────────────
+      # ── 1a. Pull Docker image from GHCR ─────────────────────────────────────
+      # The image contains a full Wine+MT5 install (~1 GB). We don't tar-cache
+      # it because saving it to /tmp exhausts the runner's disk. GHCR pulls
+      # are fast on GitHub-hosted runners (same network).
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -58,23 +61,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Restore Docker image cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/mt5-image.tar
-          key: mt5-docker-image-prebuilt-v1
-
-      - name: Load or pull Docker image
-        run: |
-          IMAGE=ghcr.io/${{ github.repository }}:latest
-          if [ -f /tmp/mt5-image.tar ]; then
-            echo "Loading image from cache..."
-            docker load < /tmp/mt5-image.tar
-          else
-            echo "Pulling pre-built image from GHCR..."
-            docker pull "$IMAGE"
-            docker save "$IMAGE" > /tmp/mt5-image.tar
-          fi
+      - name: Pull Docker image
+        run: docker pull ghcr.io/${{ github.repository }}:latest
 
       # ── 1b. Mutable config cache (fast path) ────────────────────────────────
       # Unique key per run so the post-step always saves; restore-keys finds
