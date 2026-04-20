@@ -101,11 +101,11 @@ jobs:
             fi
           fi
 
-      # ── 2. Seed config if missing ────────────────────────────────────────────
-      # Runs a one-off container to copy the pre-installed Wine+MT5 base into
-      # ./config on the host. Only triggers when terminal64.exe is absent
-      # (true cold start or cache eviction). The MT5 session container then
-      # finds a fully-populated ./config and starts in seconds.
+      # ── 2. Seed config if missing + fix ownership ───────────────────────────
+      # The cache saves ./config owned by the runner user. The container runs
+      # as uid 911 and must own all files in /config — otherwise the mt5linux
+      # server can't write its state and fails to start MT5.
+      # We fix ownership here (before the container starts) every run.
       - name: Seed MT5 config from pre-built image (if needed)
         run: |
           MT5_EXE="./config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
@@ -118,7 +118,9 @@ jobs:
               -c "cp -a /config-base/. /config/ && chown -R 911:911 /config"
             echo "Seed complete ($(du -sh ./config | cut -f1))"
           else
-            echo "Config already has MT5 — skipping seed"
+            echo "Config already has MT5 — fixing ownership for container uid 911..."
+            sudo chown -R 911:911 ./config
+            echo "Done"
           fi
 
       # ── 3. Start MT5 container ───────────────────────────────────────────────
