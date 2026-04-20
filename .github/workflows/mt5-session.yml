@@ -137,6 +137,7 @@ jobs:
             -p 3000:3000 \
             -p 8001:8001 \
             -v "$(pwd)/config:/config" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
             -e CUSTOM_USER="${MT5_USER}" \
             -e PASSWORD="${MT5_PASS}" \
             gmag11/metatrader5_vnc:latest
@@ -174,8 +175,14 @@ jobs:
             echo "::warning::terminal64.exe not detected after 5 min — dumping container state"
             echo "=== docker top mt5 ==="
             docker top mt5 2>/dev/null || echo "(docker top failed)"
+            echo "=== docker logs (first 60 lines — startup sequence) ==="
+            docker logs mt5 2>&1 | head -60 || true
             echo "=== docker logs (last 40 lines) ==="
             docker logs --tail 40 mt5 2>&1 || true
+            echo "=== /config contents ==="
+            docker exec mt5 ls -la /config/ 2>/dev/null || true
+            echo "=== terminal64.exe present? ==="
+            docker exec mt5 ls -la "/config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe" 2>/dev/null || echo "NOT FOUND"
           fi
 
           # Phase 3: window manager (confirms X desktop is up)
