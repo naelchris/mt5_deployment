@@ -50,6 +50,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Mask credentials
+        run: |
+          echo "::add-mask::${{ env.MT5_USER }}"
+          echo "::add-mask::${{ env.MT5_PASS }}"
+
       # ── 1a. Pull Docker image from GHCR ─────────────────────────────────────
       # The image contains a full Wine+MT5 install (~1 GB). We don't tar-cache
       # it because saving it to /tmp exhausts the runner's disk. GHCR pulls
