@@ -62,7 +62,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull Docker image
-        run: docker pull ghcr.io/${{ github.repository }}:latest
+        run: |
+          docker pull ghcr.io/${{ github.repository }}:latest
+          # Alias as the base image name so the session container uses the
+          # original base image entrypoint (no custom wrapper interference).
+          docker tag ghcr.io/${{ github.repository }}:latest gmag11/metatrader5_vnc:latest
 
       # ── 1b. Mutable config cache (fast path) ────────────────────────────────
       # Unique key per run so the post-step always saves; restore-keys finds
@@ -97,7 +101,27 @@ jobs:
             fi
           fi
 
-      # ── 2. Start MT5 container ───────────────────────────────────────────────
+      # ── 2. Seed config if missing ────────────────────────────────────────────
+      # Runs a one-off container to copy the pre-installed Wine+MT5 base into
+      # ./config on the host. Only triggers when terminal64.exe is absent
+      # (true cold start or cache eviction). The MT5 session container then
+      # finds a fully-populated ./config and starts in seconds.
+      - name: Seed MT5 config from pre-built image (if needed)
+        run: |
+          MT5_EXE="./config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+          if [ ! -f "$MT5_EXE" ]; then
+            echo "terminal64.exe not found — seeding from pre-built image..."
+            docker run --rm \
+              --entrypoint /bin/bash \
+              -v "$(pwd)/config:/config" \
+              ghcr.io/${{ github.repository }}:latest \
+              -c "cp -a /config-base/. /config/ && chown -R 911:911 /config"
+            echo "Seed complete ($(du -sh ./config | cut -f1))"
+          else
+            echo "Config already has MT5 — skipping seed"
+          fi
+
+      # ── 3. Start MT5 container ───────────────────────────────────────────────
       # The /config bind-mount is critical: all persistent state (Wine prefix,
       # MT5 install, account data) lives on the host so it survives restarts.
       - name: Start MT5 container
@@ -115,7 +139,7 @@ jobs:
             -v "$(pwd)/config:/config" \
             -e CUSTOM_USER="${MT5_USER}" \
             -e PASSWORD="${MT5_PASS}" \
-            ghcr.io/${{ github.repository }}:latest
+            gmag11/metatrader5_vnc:latest
           echo "Container started"
 
       # ── 3. Wait for KasmVNC + MT5 to be ready ───────────────────────────────
